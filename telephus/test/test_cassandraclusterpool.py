@@ -1,22 +1,26 @@
 from __future__ import with_statement
 
-import random
 import contextlib
-from time import time
 from itertools import groupby
+import random
+from time import time
+
 from twisted.trial import unittest
 from twisted.internet import defer, reactor
 from twisted.python import log
-from telephus.pool import (CassandraClusterPool, CassandraPoolReconnectorFactory,
-                           CassandraPoolParticipantClient, TTransport)
+
 from telephus import translate
 from telephus.cassandra.c08 import Cassandra
 from telephus.cassandra.ttypes import *
+from telephus.pool import (
+    CassandraClusterPool, CassandraPoolReconnectorFactory,
+    CassandraPoolParticipantClient, TTransport)
 
 try:
     from Cassanova import cassanova
 except ImportError:
     cassanova = None
+
 
 def deferwait(s, result=None):
     def canceller(my_d):
@@ -25,6 +29,7 @@ def deferwait(s, result=None):
     dcall = reactor.callLater(s, d.callback, result)
     return d
 
+
 def addtimeout(d, waittime):
     timeouter = reactor.callLater(waittime, d.cancel)
     def canceltimeout(x):
@@ -32,6 +37,7 @@ def addtimeout(d, waittime):
             timeouter.cancel()
         return x
     d.addBoth(canceltimeout)
+
 
 class CassandraClusterPoolTest(unittest.TestCase):
     start_port = 44449
