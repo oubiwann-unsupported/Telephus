@@ -36,3 +36,9 @@ To run the unit tests, simply use the Twisted test runner, ``trial``::
 
 The tests are included in the source code, so this should work even if you are
 not running it from the source checkout directory.
+
+Note that the unit tests are not pure unit tests, but rather functional and/or
+integration tests: they depend upon a running instance of Cassandra (they don't
+have network/db connections mocked yet). As such, you will see a great many
+errors if you attempt to run the tests without first having installed and
+started Cassandra.
