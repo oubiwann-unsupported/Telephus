@@ -2,6 +2,7 @@ import os
 
 from twisted.internet import defer, error, reactor
 from twisted.python.failure import Failure
+from twisted.trial.unittest import SkipTest
 
 from telephus import translate
 from telephus.cassandra.ttypes import *
@@ -204,7 +205,7 @@ class CassandraClientTest(base.FunctionalTestCaseBase):
     @defer.inlineCallbacks
     def test_counter_add(self):
         if self.version != CASSANDRA_08_VERSION:
-            raise unittest.SkipTest('Counters are not supported in 0.7')
+            raise SkipTest('Counters are not supported in 0.7')
 
         # test standard column counter
         yield self.client.add('test', COUNTER_CF, 1, column='col')
@@ -227,7 +228,7 @@ class CassandraClientTest(base.FunctionalTestCaseBase):
     @defer.inlineCallbacks
     def test_counter_remove(self):
         if self.version != CASSANDRA_08_VERSION:
-            raise unittest.SkipTest('Counters are not supported in 0.7')
+            raise SkipTest('Counters are not supported in 0.7')
 
         # test standard column counter
         yield self.client.add('test', COUNTER_CF, 1, column='col')
