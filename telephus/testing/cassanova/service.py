@@ -3,7 +3,8 @@ import os
 from twisted.application import service
 
 from telephus.cassandra.c08 import ttypes
-from telephus.testing.cassanova import base, partitioner, server, types
+from telephus.cassandra.ttypes import KsDef
+from telephus.testing.cassanova import base, partitioner, server
 
 
 cluster_name = os.environ.get('CASSANOVA_CLUSTER_NAME', 'Fake Cluster')
@@ -18,7 +19,7 @@ class CassanovaService(service.MultiService):
 
     def __init__(self, port=None):
         service.MultiService.__init__(self)
-        self.keyspaces = {'system': ttypes.KsDef(
+        self.keyspaces = {'system': KsDef(
             'system',
             replication_factor=1,
             strategy_class='org.apache.cassandra.locator.LocalStrategy',

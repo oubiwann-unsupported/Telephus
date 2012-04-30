@@ -5,7 +5,7 @@ from zope.interface import implements
 
 from twisted.python import log
 
-from telephus.cassandra.c08 import Cassandra, constants
+from telephus.cassandra.c08 import Cassandra, constants, ttypes
 from telephus.testing.cassanova import types
 
 
@@ -107,17 +107,17 @@ class Cassanova(object):
 
     def get_indexed_slices(self, column_parent, index_clause, column_predicate,
                            consistency_level):
-        raise types.InvalidRequestException(
+        raise ttypes.InvalidRequestException(
             why='get_indexed_slices unsupported here')
 
     def insert(self, key, column_parent, column, consistency_level):
         if not 0 < len(column.name) < (1<<16):
-            raise types.InvalidRequestException('invalid column name')
+            raise ttypes.InvalidRequestException('invalid column name')
         try:
             parent = self.service.lookup_column_parent(
                 self.keyspace, key, column_parent, make=True)
         except KeyError, e:
-            raise types.InvalidRequestException(why=e.args[0])
+            raise ttypes.InvalidRequestException(why=e.args[0])
         parent[column.name] = column
 
     def remove_column(self, key, column_path, tstamp, consistency_level):
@@ -125,7 +125,7 @@ class Cassanova(object):
             parent = self.service.lookup_column_parent(
                 self.keyspace, key, column_path)
         except KeyError, e:
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='column parent %s not found' % e.args[0])
         try:
             col = parent[column_path.column]
@@ -192,7 +192,7 @@ class Cassanova(object):
             return self.remove(
                 row[None], cp, deletion.timestamp, consistency_level)
         if deletion.predicate.slice_range is not None:
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 'Not supposed to support batch_mutate deletions with a '
                 'slice_range (although we would if this check was gone)')
         if deletion.super_column is not None:
@@ -219,13 +219,13 @@ class Cassanova(object):
     def apply_mutate_insert(self, cf, row, cosc, consistency_level):
         if cf.column_type == 'Super':
             if cosc.super_column is None:
-                raise types.InvalidRequestException(
+                raise ttypes.InvalidRequestException(
                     'inserting Column into SuperColumnFamily')
             self.apply_mutate_insert_super(
                 row, cosc.super_column, consistency_level)
         else:
             if cosc.super_column is not None:
-                raise types.InvalidRequestException(
+                raise ttypes.InvalidRequestException(
                     'inserting SuperColumn into standard ColumnFamily')
             self.apply_mutate_insert_standard(
                 row, cosc.column, consistency_level)
@@ -238,7 +238,7 @@ class Cassanova(object):
                 for mutation in mutatelist:
                     if (mutation.column_or_supercolumn is not None
                     and mutation.deletion is not None):
-                        raise types.InvalidRequestException(
+                        raise ttypes.InvalidRequestException(
                             why='Both deletion and insertion in same mutation')
                     if mutation.column_or_supercolumn is not None:
                         self.apply_mutate_insert(
@@ -252,7 +252,7 @@ class Cassanova(object):
         try:
             cf, dat = self.service.lookup_cf_and_data(self.keyspace, cfname)
         except KeyError, e:
-            raise types.InvalidRequestException(why=e.args[0])
+            raise ttypes.InvalidRequestException(why=e.args[0])
         name = dat[None]
         dat.clear()
         dat[None] = name
@@ -275,11 +275,11 @@ class Cassanova(object):
     def describe_ring(self, keyspace):
         if keyspace == 'system':
             # we are a bunch of jerks
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 "no replication ring for keyspace 'system'")
         self.service.get_keyspace(keyspace)
         trmap = self.service.get_range_to_endpoint_map()
-        return [types.TokenRange(
+        return [ttypes.TokenRange(
             start_token=lo, end_token=hi, endpoints=[c.endpoint_str()
                 for c in endpoints])
             for ((lo, hi), endpoints) in trmap.items()]
@@ -293,18 +293,18 @@ class Cassanova(object):
     def describe_keyspace(self, ksname):
         try:
             return self.service.get_keyspace(ksname)
-        except types.InvalidRequestException:
+        except ttypes.InvalidRequestException:
             raise types.NotFoundException()
 
     def describe_splits(self, cfname, starttoken, endtoken, keys_per_split):
-        raise types.InvalidRequestException(
+        raise ttypes.InvalidRequestException(
             why='describe_splits unsupported here')
 
     def system_add_column_family(self, cfdef):
         ks = self.keyspace
         for cf in ks.cf_defs:
             if cf.name == cfdef.name:
-                raise types.InvalidRequestException(
+                raise ttypes.InvalidRequestException(
                     why='CF %r already exists' % cf.name)
         self.set_defaults_on_cfdef(cfdef)
         cfdef.keyspace = self.keyspace.name
@@ -313,7 +313,7 @@ class Cassanova(object):
 
     def set_defaults_on_cfdef(self, cfdef):
         if not valid_cf_name_re.match(cfdef.name):
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='Invalid columnfamily name %r' % cfdef.name)
         if cfdef.comparator_type is None:
             cfdef.comparator_type = 'BytesType'
@@ -329,7 +329,7 @@ class Cassanova(object):
                 vstype.comparator
                 cfdef.subcomparator_type = vstype.java_name
         except (KeyError, AttributeError), e:
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='Invalid comparator or subcomparator class: %s' % (
                     e.args[0],))
         if cfdef.gc_grace_seconds is None:
@@ -352,7 +352,7 @@ class Cassanova(object):
         ks = self.keyspace
         newlist = [cf for cf in ks.cf_defs if cf.name != cfname]
         if len(newlist) == len(ks.cf_defs):
-            raise types.InvalidRequestException(why='no such CF %r' % cfname)
+            raise ttypes.InvalidRequestException(why='no such CF %r' % cfname)
         ks.cf_defs = newlist
         try:
             del self.service.data[ks.name][cfname]
@@ -362,16 +362,16 @@ class Cassanova(object):
 
     def system_add_keyspace(self, ksdef):
         if ksdef.name in self.service.keyspaces:
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='keyspace %r already exists' % ksdef.name)
         if not valid_ks_name_re.match(ksdef.name):
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='invalid keyspace name %r' % ksdef.name)
         try:
             ksdef.strat = self.service.load_class_by_java_name(
                 ksdef.strategy_class)
         except KeyError:
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='Unable to find replication strategy %r' %
                     (ksdef.strategy_class,))
         for cf in ksdef.cf_defs:
@@ -384,7 +384,7 @@ class Cassanova(object):
         try:
             del self.service.keyspaces[ksname]
         except KeyError:
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='no such keyspace %r' % ksname)
         try:
             del self.service.data[ksname]
@@ -394,14 +394,14 @@ class Cassanova(object):
 
     def system_update_keyspace(self, ksdef):
         if not valid_ks_name_re.match(ksdef.name):
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='invalid keyspace name %r' % ksdef.name)
         self.service.get_keyspace(ksdef.name)
         try:
             ksdef.strat = self.service.load_class_by_java_name(
                 ksdef.strategy_class)
         except KeyError:
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='Unable to find replication strategy %r' % (
                     ksdef.strategy_class,))
         for cf in ksdef.cf_defs:
@@ -414,13 +414,13 @@ class Cassanova(object):
         try:
             oldcf = self.service.lookup_cf(self.keyspace, cfdef.name)
         except KeyError:
-            raise types.InvalidRequestException(
+            raise ttypes.InvalidRequestException(
                 why='no such columnfamily %s' % cfdef.name)
         self.set_defaults_on_cfdef(cfdef)
         # can't change some attributes
         for attr in ('keyspace', 'comparator_type', 'subcomparator_type'):
             if getattr(cfdef, attr, None) != getattr(oldcf, attr, None):
-                raise types.InvalidRequestException(
+                raise ttypes.InvalidRequestException(
                     why="can't change %s" % attr)
         for attr, val in cfdef.__dict__.iteritems():
             if attr != 'id':
@@ -428,7 +428,7 @@ class Cassanova(object):
         return self.node.schema_code()
 
     def execute_cql_query(query, compression):
-        raise types.InvalidRequestException(why='CQL unsupported here')
+        raise ttypes.InvalidRequestException(why='CQL unsupported here')
 
     @staticmethod
     def filter_by_col_names(cols, colnames):

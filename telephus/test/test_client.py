@@ -2,12 +2,12 @@ import os
 
 from twisted.internet import defer, error, reactor
 from twisted.python.failure import Failure
-from twisted.trial import unittest
 
 from telephus import translate
 from telephus.cassandra.ttypes import *
 from telephus.client import CassandraClient
 from telephus.protocol import ManagedCassandraClientFactory, APIMismatch
+from telephus.testing import base
 from telephus.translate import (
     CASSANDRA_08_VERSION, thrift_api_ver_to_cassandra_ver)
 
@@ -31,7 +31,7 @@ SCOLUMN = 'bar'
 DO_SYSTEM_RENAMING = False
 
 
-class CassandraClientTest(unittest.TestCase):
+class CassandraClientTest(base.FunctionalTestCaseBase):
     @defer.inlineCallbacks
     def setUp(self):
         self.cmanager = ManagedCassandraClientFactory(keyspace='system')

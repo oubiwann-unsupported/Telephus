@@ -1,548 +1,25 @@
-# pool.py
-#
-# spread requests among connections to multiple nodes in a Cassandra cluster
-
-"""
-Quick start:
-
->>> my_seed_nodes = ['192.168.2.14', '192.168.2.15', '192.168.2.16']
->>> mypool = CassandraClusterPool(
-...   my_seed_nodes, keyspace='MyKeyspace', pool_size=10)
->>> mypool.startService()
->>> mypool.get('Key12345', 'SomeCF')
-<Deferred at 0x1b2b248>
-
-CassandraClusterPool will respond to all the methods on CassandraClient, but
-if you prefer to have separate CassandraClient instances, set your pool object
-as their manager.
-
-Some of the most useful additional methods on CassandraClusterPool:
-
-   adjustPoolSize(newsize)      # change the size of the connection pool,
-                                #   without interrupting ongoing requests
-   addNode((address, port))     # manually add another node to the pool.
-                                #   Normally this shouldn't be necessary; once
-                                #   the pool can connect to one or more of your
-                                #   your seed nodes, it can inspect the ring
-                                #   and find the rest of the nodes.
-   removeNode((address, port))  # manually remove a node from the pool. It will
-                                #   be re-added later if it shows up in the
-                                #   ring with a subsequent connection, though.
-   set_keyspace(ksname)         # change the keyspace used for future requests
-                                #   on this pool
-
-TODO:
-
-    * check cluster name on connecting to each new host, to make sure it's
-      actually in the same cluster
-    * take node error/connection history into account with add_connection_score
-    * remove nodes that have been missing or unconnectable for too long
-    * when seed node list is shofter than requested pool size, don't try to
-      fill the pool completely until after a seed node is contacted and an
-      initial live-node list collected
-
-"""
-
-import sys
-import random
-import socket
-from time import time
 from itertools import izip, groupby
-from warnings import warn
+import socket
+import sys
+
 from twisted.application import service
-from twisted.internet import defer, protocol, error
+from twisted.internet import defer, error
 from twisted.python import failure, log
+
 from thrift import Thrift
-from thrift.transport import TTwisted, TTransport
-from thrift.protocol import TBinaryProtocol
-from telephus.protocol import (ManagedThriftRequest, ClientBusy,
-                               InvalidThriftRequest)
-from telephus.cassandra.c08 import Cassandra as Cassandra08
-from telephus.cassandra.ttypes import *
+from thrift.transport import TTransport
+
+from telephus import exceptions
+from telephus.cassandra.c08 import ttypes
 from telephus.client import CassandraClient
-from telephus.translate import (thrift_api_ver_to_cassandra_ver, translateArgs,
-                                postProcess)
+from telephus.pool.connection import (
+    CassandraKeyspaceConnection, lame_log_insufficient_nodes)
+from telephus.pool.protocol import CassandraPoolReconnectorFactory
+from telephus.pool.server import CassandraNode
+from telephus.protocol import ManagedThriftRequest
 
 
 noop = lambda *a, **kw: None
-
-
-class NoKeyspacesAvailable(UserWarning):
-    """
-    Indicates CassandraClusterPool could not collect information about the
-    cluster ring, in order to automatically add nodes to the pool.
-
-    When Cassandra's thrift interface allows specifying null for describe_ring
-    (like the underlying java interface already does), we can remove this.
-    """
-
-
-class NoNodesAvailable(Exception):
-    """
-    Indicates there are nodes to which we are allowed to make another immediate
-    connection. The argument to this exception should be the expected number
-    of seconds before a node /will/ be available.
-
-    This should be handled internally; user code is not expected to see or
-    handle this type of exception.
-    """
-
-
-def lame_log_insufficient_nodes(poolsize, pooltarget, pending_reqs, waittime):
-    msg = ('(No candidate nodes to expand pool to target size %d from %d; '
-           'there are %d pending requests.' % (
-            pooltarget, poolsize, pending_reqs))
-    if waittime is None:
-        msg += ')'
-    else:
-        msg += ' Expected candidate node retry in %.1f seconds.)' % waittime
-    log.msg(msg)
-
-
-class CassandraPoolParticipantClient(TTwisted.ThriftClientProtocol):
-    thriftFactory = TBinaryProtocol.TBinaryProtocolAcceleratedFactory
-
-    def __init__(self):
-        TTwisted.ThriftClientProtocol.__init__(self, Cassandra08.Client,
-                                               self.thriftFactory())
-
-    def connectionMade(self):
-        TTwisted.ThriftClientProtocol.connectionMade(self)
-        self.factory.clientConnectionMade(self)
-
-    def connectionLost(self, reason):
-        # the TTwisted version of this call does not account for the
-        # possibility of other things happening during the errback.
-        tex = TTransport.TTransportException(
-            type=TTransport.TTransportException.END_OF_FILE,
-            message='Connection closed (%s)' % reason)
-        while self.client._reqs:
-            k = iter(self.client._reqs).next()
-            v = self.client._reqs.pop(k)
-            v.errback(tex)
-        del self.client._reqs
-        del self.client
-
-
-class CassandraPoolReconnectorFactory(protocol.ClientFactory):
-    protocol = CassandraPoolParticipantClient
-    connector = None
-    last_error = None
-    noisy = False
-
-    # store the keyspace this connection is set to. we will take thrift
-    # requests along with the keyspace in which they expect to be made, and
-    # change keyspaces if necessary. this is done this way to avoid having
-    # another layer of queueing for requests in this class (in addition to the
-    # queue in CassandraClusterPool), or special logic here to pass on
-    # set_keyspace calls from the service at the right time (so already-queued
-    # requests still get made in their right keyspaces).
-    keyspace = None
-
-    def __init__(self, node, service, api_version=None):
-        self.node = node
-        # if self.service is None, don't bother doing anything. nobody loves
-        # us.
-        self.service = service
-        self.my_proto = None
-        self.job_d = self.jobphase = None
-        self.api_version = api_version
-
-    def clientConnectionMade(self, proto):
-        assert self.my_proto is None
-        assert self.jobphase is None, 'jobphase=%r' % (self.jobphase,)
-        if self.service is None:
-            proto.transport.loseConnection()
-        else:
-            self.my_proto = proto
-            self.service.client_conn_made(self)
-
-    def clientConnectionFailed(self, connector, reason):
-        assert self.my_proto is None
-        assert self.jobphase is None, 'jobphase=%r' % (self.jobphase,)
-        self.my_proto = None
-        if self.service is not None:
-            self.connector = connector
-            self.service.client_conn_failed(reason, self)
-
-    def clientConnectionLost(self, connector, reason):
-        self.logstate('clientConnectionLost')
-        p = self.my_proto
-        self.my_proto = None
-        self.stop_working_on_queue()
-        if p is not None and self.service is not None:
-            self.connector = connector
-            self.service.client_conn_lost(self, reason)
-
-    def stopFactory(self):
-        # idempotent
-        self.logstate('stopFactory')
-        protocol.ClientFactory.stopFactory(self)
-        if self.connector:
-            try:
-                self.connector.stopConnecting()
-            except error.NotConnectingError:
-                pass
-        self.connector = None
-        p = self.my_proto
-        self.my_proto = None
-        self.stop_working_on_queue()
-        if p is not None and p.transport is not None:
-            p.transport.loseConnection()
-
-    def isConnecting(self):
-        if self.connector is None:
-            if self.my_proto is None:
-                # initial connection attempt
-                return True
-            else:
-                # initial connection succeeded and hasn't died
-                return False
-        return self.connector.state == 'connecting'
-
-    def retry(self):
-        """
-        Retry this factory's connection. It is assumed that a previous
-        connection was attempted and failed- either before or after a
-        successful connection.
-        """
-
-        if self.connector is None:
-            raise ValueError("No connector to retry")
-        if self.service is None:
-            return
-        self.connector.connect()
-
-    def prep_connection(self, creds=None, keyspace=None):
-        """
-        Do login and set_keyspace tasks as necessary, and also check this
-        node's idea of the Cassandra ring. Expects that our connection is
-        alive.
-
-        Return a Deferred that will fire with the ring information, or be
-        errbacked if something goes wrong.
-        """
-
-        d = self.my_describe_version()
-
-        def check_version(thrift_ver):
-            cassver = thrift_api_ver_to_cassandra_ver(thrift_ver)
-            if self.api_version is None:
-                self.api_version = cassver
-            elif self.api_version != cassver:
-                raise APIMismatch(
-                    "%s is exposing thrift protocol version %s -> "
-                    "Cassandra version %s, but %s was expected" % (
-                        self.node, thrift_ver, cassver, self.api_version))
-        d.addCallback(check_version)
-        if creds is not None:
-            d.addCallback(lambda _: self.my_login(creds))
-        if keyspace is not None:
-            d.addCallback(lambda _: self.my_set_keyspace(keyspace))
-        d.addCallback(lambda _: self.my_describe_ring(keyspace))
-        return d
-
-    # The following my_* methods are for internal use, to facilitate the
-    # management of the pool and the queries we get. The user should make
-    # use of the methods on CassandraClient.
-
-    def my_login(self, creds):
-        return self.execute(
-            ManagedThriftRequest(
-                'login', AuthenticationRequest(credentials=creds))
-        )
-
-    def my_set_keyspace(self, keyspace):
-        return self.execute(ManagedThriftRequest('set_keyspace', keyspace))
-
-    def my_describe_ring(self, keyspace=None):
-        if keyspace is None or keyspace == 'system':
-            d = self.my_pick_non_system_keyspace()
-        else:
-            d = defer.succeed(keyspace)
-        d.addCallback(lambda k: self.execute(ManagedThriftRequest(
-            'describe_ring', k)))
-
-        def suppress_no_keyspaces_error(f):
-            f.trap(NoKeyspacesAvailable)
-            return ()
-        d.addErrback(suppress_no_keyspaces_error)
-        return d
-
-    def my_describe_version(self):
-        return self.execute(ManagedThriftRequest('describe_version'))
-
-    def my_describe_keyspaces(self):
-        return self.execute(ManagedThriftRequest('describe_keyspaces'))
-
-    def my_pick_non_system_keyspace(self):
-        """
-        Find a keyspace in the cluster which is not 'system', for the purpose
-        of getting a valid ring view. Can't use 'system' or null.
-        """
-        d = self.my_describe_keyspaces()
-
-        def pick_non_system(klist):
-            for k in klist:
-                if k.name != 'system':
-                    return k.name
-            err = NoKeyspacesAvailable("Can't gather information about the "
-                                       "Cassandra ring; no non-system "
-                                       "keyspaces available")
-            warn(err)
-            raise err
-        d.addCallback(pick_non_system)
-        return d
-
-    def store_successful_keyspace_set(self, val, ksname):
-        self.keyspace = ksname
-        return val
-
-    def execute(self, req, keyspace=None):
-        if self.my_proto is None:
-            return defer.errback(error.ConnectionClosed(
-                'Lost connection before %s request could be made' % (
-                    req.method,)))
-        method = getattr(self.my_proto.client, req.method, None)
-        if method is None:
-            raise InvalidThriftRequest(
-                "don't understand %s request" % req.method)
-
-        d = defer.succeed(0)
-
-        if req.method == 'set_keyspace':
-            newksname = req.args[0]
-            d.addCallback(lambda _: method(newksname))
-            d.addCallback(self.store_successful_keyspace_set, newksname)
-        else:
-            if keyspace is not None and keyspace != self.keyspace:
-                d.addCallback(lambda _: self.my_set_keyspace(keyspace))
-            args = translateArgs(req, self.api_version)
-            d.addCallback(lambda _: method(*args))
-            d.addCallback(lambda results: postProcess(results, req.method))
-        return d
-
-    def clear_job(self, x):
-        self.logstate('clear job %s (result %r)' % (self.jobphase, x))
-        self.jobphase = None
-        self.job_d = None
-        return x
-
-    def job(self, _name, _func, *args, **kw):
-        self.logstate('start job %s' % _name)
-        if self.jobphase is not None:
-            raise ClientBusy('Tried to start job phase %s while in %s'
-                             % (_name, self.jobphase))
-        self.jobphase = _name
-        d = defer.maybeDeferred(_func, *args, **kw)
-        self.job_d = d
-        d.addBoth(self.clear_job)
-        return d
-
-    def process_request_error(self, err, req, keyspace, req_d, retries):
-        self.logstate('process_request_error: %s, retries=%d' % (err, retries))
-        self.last_error = err
-        if (retries > 0 and self.service is not None and
-            err.check(*self.service.retryables)):
-            self.logstate('-- resubmit --')
-            assert self.jobphase is None, \
-                    'Factory might retry its own fatal error'
-            self.service.resubmit(req, keyspace, req_d, retries - 1)
-        else:
-            self.logstate('-- giving up [retries=%d service=%s err=%s] --'
-                          % (retries, self.service, err.value))
-            req_d.errback(err)
-
-    def work_on_request(self, reqtuple):
-        req, keyspace, req_d, retries = reqtuple
-        if req_d.called:
-            # cancelled while pending in the queue
-            return
-        d = self.job('pending_request', self.execute, req, keyspace)
-        d.addCallback(req_d.callback)
-        d.addErrback(self.process_request_error, req, keyspace, req_d, retries)
-        return d
-
-    def maybe_do_more_work(self, _, q):
-        # it's possible this is being called as part of the immediate callback
-        # chain after the protocol's connectionLost errbacking. if so, our own
-        # connectionLost hasn't been called yet. allow all current processing
-        # to finish before deciding whether we get to do more.
-        def _real_maybe_do_more_work():
-            if not self.keep_working:
-                self.stopFactory()
-            elif self.service is not None:
-                self.work_on_queue(q)
-        if self.service is not None:
-            self.service.reactor.callLater(0, _real_maybe_do_more_work)
-
-    def scream_like_a_little_girl(self, fail):
-        if self.service is not None:
-            complain = self.service.err
-        else:
-            complain = log.err
-        complain(fail, "Factory for connection to %s had problems dealing with"
-                       " the queue" % (self.node,))
-        # don't process more requests
-
-    def work_on_queue(self, q):
-        self.logstate('work_on_queue')
-        self.keep_working = True
-        d = self.job('queue_getter', q.get)
-        d.addCallback(self.work_on_request)
-        d.addCallback(self.maybe_do_more_work, q)
-        d.addErrback(lambda f: f.trap(defer.CancelledError))
-        d.addErrback(self.scream_like_a_little_girl)
-        return d
-
-    def stop_working_on_queue(self):
-        self.logstate('stop_working_on_queue [jobphase=%s]' % self.jobphase)
-        self.keep_working = False
-        if self.jobphase == 'queue_getter':
-            self.job_d.cancel()
-
-    def finish_and_die(self):
-        """
-        If there is a request pending, let it finish and be handled, then
-        disconnect and die. If not, cancel any pending queue requests and
-        just die.
-        """
-        self.logstate('finish_and_die')
-        self.stop_working_on_queue()
-        if self.jobphase != 'pending_request':
-            self.stopFactory()
-
-    def logstate(self, msg):
-        if getattr(self, 'debugging', False):
-            log.msg('CPRF 0x%x (node %s) [%s]: %s'
-                    % (id(self), self.node, self.jobphase, msg))
-
-
-class CassandraKeyspaceConnection:
-    """
-    Glue class which acts as a manager for CassandraClient but passes requests
-    on to a CassandraClusterPool- in the case where you want all requests
-    through this manager to be guaranteed to go to the same keyspace,
-    regardless of what other consumers of the CassandraClusterPool might do.
-    """
-
-    def __init__(self, pool, keyspace):
-        self.pool = pool
-        self.keyspace = keyspace
-
-    def pushRequest(self, req, retries=None):
-        return self.pool.pushRequest(
-            req, retries=retries, keyspace=self.keyspace)
-
-    def set_keyspace(self, keyspace):
-        raise RuntimeError("Don't call set_keyspace on a "
-                           "CassandraKeyspaceConnection")
-
-    def login(self, credentials):
-        return self.pool.login(credentials)
-
-
-class CassandraNode:
-    """
-    Represent a Cassandra node, in the same sense Cassandra uses.
-
-    Keep track of connection success and failure history for some time, so
-    that smarter decisions can be made about where to make new connections
-    within a pool.
-
-    Implement exponential backoff in reconnect time when connections fail.
-
-    @ivar history_interval: Keep history entries for at least this many seconds
-
-    @ivar max_delay: Forced delay between connection attempts will not exceed
-        this value (although actual connection attempts may be farther apart
-        than this, if the pool has enough connections without it)
-    """
-
-    history_interval = 86400
-    max_delay = 180
-    initial_delay = 0.05
-
-    # NIST backoff factors
-    factor = protocol.ReconnectingClientFactory.factor
-    jitter = protocol.ReconnectingClientFactory.jitter
-
-    def __init__(self, host, port):
-        self.host = host
-        self.port = port
-        self.reconnect_delay = self.initial_delay
-        self.can_reconnect_at = 0
-
-        # a list of (timestamp, error) tuples, least recent first.
-        # (timestamp, None) tuples will be inserted on a successful connection.
-        self.history = []
-
-    def record_hist(self, value):
-        now = time()
-        if (self.history and
-            self.history[0][0] < (now - self.history_interval * 2)):
-            # it has been 2x history_interval; prune history
-            cutoff = now - self.history_interval
-            for n, (tstamp, hval) in enumerate(self.history):
-                if tstamp > cutoff:
-                    break
-            self.history = self.history[n:]
-        self.history.append((now, value))
-
-    def conn_success(self):
-        self.reconnect_delay = self.initial_delay
-        self.can_reconnect_at = 0
-        self.record_hist(None)
-
-    def conn_fail(self, reason):
-        # these tend to come in clusters. if the same error was received
-        # recently (before the reconnect delay expired), return False to
-        # indicate the event is not 'notable', and don't bump the delay
-        # to a higher level.
-        is_notable = self.is_failure_notable(reason)
-        self.record_hist(reason.value)
-        if is_notable:
-            newdelay = min(self.reconnect_delay * self.factor, self.max_delay)
-            if self.jitter:
-                newdelay = random.normalvariate(
-                    newdelay, newdelay * self.jitter)
-            self.reconnect_delay = newdelay
-            self.can_reconnect_at = time() + newdelay
-        else:
-            # reset but use the same delay
-            self.can_reconnect_at = time() + self.reconnect_delay
-        return is_notable
-
-    def is_failure_notable(self, reason):
-        try:
-            tstamp, last_err = self.history[-1]
-        except IndexError:
-            pass
-        else:
-            if type(last_err) is type(reason.value):
-                if time() < self.can_reconnect_at:
-                    return False
-        return True
-
-    def seconds_until_connect_ok(self):
-        return self.can_reconnect_at - time()
-
-    def __str__(self):
-        return '<%s %s:%s @0x%x>' % (self.__class__.__name__,
-                                     self.host, self.port, id(self))
-
-    __repr__ = __str__
-
-    def __eq__(self, other):
-        return self.__class__ == other.__class__ \
-           and self.host == other.host \
-           and self.port == other.port
-
-    def __cmp__(self, other):
-        return cmp((self.host, self.port), (other.host, other.port))
-
-    def __hash__(self):
-        return hash((self.__class__, self.host, self.port))
 
 
 class CassandraClusterPool(service.Service, object):
@@ -615,12 +92,12 @@ class CassandraClusterPool(service.Service, object):
     conn_factory = CassandraPoolReconnectorFactory
 
     retryables = (IOError, socket.error, Thrift.TException,
-                  TimedOutException, UnavailableException,
+                  ttypes.TimedOutException, ttypes.UnavailableException,
                   TTransport.TTransportException)
 
     def __init__(self, seed_list, keyspace=None, creds=None, thrift_port=None,
                  pool_size=None, conn_timeout=10, bind_address=None,
-                 log_cb=log.msg, reactor=None, require_api_version=None):
+                 log_cb=log.msg, reactor=None, api_version=None):
         """
         Initialize a CassandraClusterPool.
 
@@ -664,7 +141,7 @@ class CassandraClusterPool(service.Service, object):
         @param reactor: The reactor instance to use when starting thrift
             connections or setting timers.
 
-        @param require_api_version: If not None, Telephus will require that
+        @param api_version: If not None, Telephus will require that
             all connections conform to the API for the given Cassandra version.
             Possible values are "0.7", "0.8", "1.0", etc.
 
@@ -688,7 +165,7 @@ class CassandraClusterPool(service.Service, object):
         self.keyspace = keyspace
         self.creds = creds
         self.request_queue = defer.DeferredQueue()
-        self.require_api_version = require_api_version
+        self.api_version = api_version
         self.future_fill_pool = None
         self.removed_nodes = set()
         self._client_instance = CassandraClient(self)
@@ -889,7 +366,7 @@ class CassandraClusterPool(service.Service, object):
             scores = map(self.add_connection_score, nodes)
             bestscore, bestnode = max(zip(scores, nodes))
             if bestscore < 0:
-                raise NoNodesAvailable(-bestscore)
+                raise exceptions.NoNodesAvailable(-bestscore)
             yield bestnode
 
     def choose_pending_conns_to_kill(self):
@@ -951,7 +428,7 @@ class CassandraClusterPool(service.Service, object):
             for num, node in izip(
                 xrange(need), self.choose_nodes_to_connect()):
                 self.make_conn(node)
-        except NoNodesAvailable, e:
+        except exceptions.NoNodesAvailable, e:
             waittime = e.args[0]
             if waittime == float('Inf'):
                 waittime = None
@@ -977,7 +454,7 @@ class CassandraClusterPool(service.Service, object):
 
     def make_conn(self, node):
         self.log('Adding connection to %s' % (node,))
-        f = self.conn_factory(node, self, self.require_api_version)
+        f = self.conn_factory(node, self, self.api_version)
         bindaddr = self.bind_address
         if bindaddr is not None and isinstance(bindaddr, str):
             bindaddr = (bindaddr, 0)
@@ -1118,7 +595,8 @@ class CassandraClusterPool(service.Service, object):
 
     consistency = property(get_consistency, set_consistency)
 
-    def keyspaceConnection(self, keyspace, consistency=ConsistencyLevel.ONE):
+    def keyspaceConnection(self, keyspace, 
+                           consistency=ttypes.ConsistencyLevel.ONE):
         """
         Return a CassandraClient instance which uses this CassandraClusterPool
         by way of a CassandraKeyspaceConnection, so that all requests made

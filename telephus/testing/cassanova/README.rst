@@ -1,6 +1,5 @@
----------
 Cassanova
----------
+=========
 
 Cassanova is a fake Cassandra cluster. It runs in a single Python thread and
 is very lightweight for startup and shutdown- making it particularly useful
@@ -27,7 +26,7 @@ What it does *not* support (yet?):
 - Perform efficiently (data is stored according to what was easiest to write,
   not what would be most efficient for writes or lookups)
 
------
+
 Using
 -----
 
@@ -57,8 +56,8 @@ working against the 0.7.3 branch, so I know it works there), make sure the
 
     make check-cassanova
 
--------------
-Code overview
+
+Code Overview
 -------------
 
 All the real code is in ``telephus.testing.cassanova``. The more important
@@ -75,7 +74,7 @@ classes are:
   instantiate new listening ``api.CassanovaNode``\s, given a unique network
   interface.
 
-------------
+
 Data Storage
 ------------
 

@@ -9,165 +9,21 @@ from twisted.trial import unittest
 from twisted.internet import defer, reactor
 from twisted.python import log
 
+from thrift.transport import TTransport
+
 from telephus import translate
 from telephus.cassandra.c08 import Cassandra
 from telephus.cassandra.ttypes import *
-from telephus.pool import (
-    CassandraClusterPool, CassandraPoolReconnectorFactory,
-    CassandraPoolParticipantClient, TTransport)
+from telephus.pool.service import CassandraClusterPool
+from telephus.pool.protocol import (
+    CassandraPoolParticipantClient, CassandraPoolReconnectorFactory)
 
-try:
-    from Cassanova import cassanova
-except ImportError:
-    cassanova = None
-
-
-def deferwait(s, result=None):
-    def canceller(my_d):
-        dcall.cancel()
-    d = defer.Deferred(canceller=canceller)
-    dcall = reactor.callLater(s, d.callback, result)
-    return d
+from telephus.testing import base, fake
+from telephus.testing.cassanova import server as cassanova_server
+from telephus.testing.util import addtimeout, deferwait
 
 
-def addtimeout(d, waittime):
-    timeouter = reactor.callLater(waittime, d.cancel)
-    def canceltimeout(x):
-        if timeouter.active():
-            timeouter.cancel()
-        return x
-    d.addBoth(canceltimeout)
-
-
-class CassandraClusterPoolTest(unittest.TestCase):
-    start_port = 44449
-    ksname = 'TestKeyspace'
-
-    def assertFired(self, d):
-        self.assert_(d.called, msg='%s has not been fired' % (d,))
-
-    def assertNotFired(self, d):
-        self.assertNot(d.called, msg='Expected %s not to have been fired, but'
-                                     ' it has been fired.' % (d,))
-
-    def assertNumConnections(self, num):
-        conns = self.cluster.get_connections()
-        self.assertEqual(len(conns), num,
-                         msg='Expected %d existing connections to cluster, but'
-                             ' %d found.' % (num, len(conns)))
-        return conns
-
-    def assertNumUniqueConnections(self, num):
-        conns = self.cluster.get_connections()
-        conns = set(n for (n,p) in conns)
-        self.assertEqual(len(conns), num,
-                         msg='Expected %d unique nodes in cluster with existing'
-                             ' connections, but %d found. Whole set: %r'
-                             % (num, len(conns), sorted(conns)))
-        return conns
-
-    def assertNumWorkers(self, num):
-        workers = self.cluster.get_working_connections()
-        self.assertEqual(len(workers), num,
-                         msg='Expected %d pending requests being worked on in '
-                             'cluster, but %d found' % (num, len(workers)))
-        return workers
-
-    def killSomeConn(self):
-        conns = self.cluster.get_connections()
-        self.assertNotEqual(len(conns), 0)
-        node, proto = conns[0]
-        proto.transport.loseConnection()
-        return proto
-
-    def killSomeNode(self):
-        conns = self.cluster.get_connections()
-        self.assertNotEqual(len(conns), 0)
-        node, proto = conns[0]
-        node.stopService()
-        return node
-
-    def killWorkingConn(self):
-        conns = self.cluster.get_working_connections()
-        self.assertNotEqual(len(conns), 0)
-        node, proto = conns[0]
-        proto.transport.loseConnection()
-        return proto
-
-    def killWorkingNode(self):
-        conns = self.cluster.get_working_connections()
-        self.assertNotEqual(len(conns), 0)
-        node, proto = conns[0]
-        node.stopService()
-        return node
-
-    @contextlib.contextmanager
-    def cluster_and_pool(self, num_nodes=10, pool_size=5, start=True,
-                         cluster_class=None, api_version=None):
-        if cluster_class is None:
-            cluster_class = FakeCassandraCluster
-        cluster = cluster_class(num_nodes, start_port=self.start_port)
-        pool = CassandraClusterPool([cluster.iface], thrift_port=self.start_port,
-                                    pool_size=pool_size, api_version=api_version)
-        if start:
-            cluster.startService()
-            pool.startService()
-        self.cluster = cluster
-        self.pool = pool
-        try:
-            yield cluster, pool
-        finally:
-            del self.pool
-            del self.cluster
-            if pool.running:
-                pool.stopService()
-            if cluster.running:
-                cluster.stopService()
-
-    @defer.inlineCallbacks
-    def make_standard_cfs(self, ksname=None):
-        if ksname is None:
-            ksname = self.ksname
-        yield self.pool.system_add_keyspace(
-            KsDef(
-                name=ksname,
-                replication_factor=1,
-                strategy_class='org.apache.cassandra.locator.SimpleStrategy',
-                cf_defs=(
-                    CfDef(
-                        keyspace=ksname,
-                        name='Standard1',
-                        column_type='Standard'
-                    ),
-                    CfDef(
-                        keyspace=ksname,
-                        name='Super1',
-                        column_type='Super'
-                    )
-                )
-            )
-        )
-        yield self.pool.set_keyspace(ksname)
-        yield self.pool.insert('key', 'Standard1', column='col', value='value')
-
-    @defer.inlineCallbacks
-    def insert_dumb_rows(self, ksname=None, cf=None, numkeys=10, numcols=10,
-                         timestamp=0):
-        if ksname is None:
-            ksname = self.ksname
-        if cf is None:
-            cf = 'Standard1'
-        yield self.pool.set_keyspace(ksname)
-
-        mutmap = {}
-        for k in range(numkeys):
-            key = 'key%03d' % k
-            cols = [Column(name='%s-%03d-%03d' % (ksname, k, n),
-                           value='val-%s-%03d-%03d' % (ksname, k, n),
-                           timestamp=timestamp)
-                    for n in range(numcols)]
-            mutmap[key] = {cf: cols}
-        yield self.pool.batch_mutate(mutationmap=mutmap)
+class CassandraClusterPoolTest(base.UseCassandraTestCaseBase):
 
     @defer.inlineCallbacks
     def test_set_keyspace(self):
@@ -577,10 +433,11 @@ class CassandraClusterPoolTest(unittest.TestCase):
         num_nodes = 3
         pool_size = 5
 
-        class LyingCassanovaNode(cassanova.CassanovaNode):
+        class LyingCassanovaNode(cassanova_server.CassanovaNode):
             def endpoint_str(self):
                 return '127.0.0.1:%d' % (self.addr.port + 1000)
-        class LyingFakeCluster(FakeCassandraCluster):
+
+        class LyingFakeCluster(fake.FakeCassandraCluster):
             node_class = LyingCassanovaNode
 
         with self.cluster_and_pool(num_nodes=num_nodes, pool_size=1,
@@ -836,78 +693,3 @@ class CassandraClusterPoolTest(unittest.TestCase):
         self.assertApproximates(endtime - starttime, runtime, 0.5 * runtime)
         self.flushLoggedErrors()
 
-if cassanova:
-    class EnhancedCassanovaInterface(cassanova.CassanovaInterface):
-        """
-        Add a way to request operations which are guaranteed to take (at least) a
-        given amount of time, for easier testing of things which might take a long
-        time in the real world
-        """
-
-        def get(self, key, column_path, consistency_level):
-            args = []
-            if '/' in column_path.column_family:
-                parts = column_path.column_family.split('/')
-                column_path.column_family = parts[0]
-                args = parts[1:]
-            d = defer.maybeDeferred(cassanova.CassanovaInterface.get, self, key,
-                                    column_path, consistency_level)
-            waittime = 0
-            for arg in args:
-                if arg.startswith('wait='):
-                    waittime += float(arg[5:])
-            if waittime > 0:
-                def doWait(x):
-                    waiter = deferwait(waittime, x)
-                    self.service.waiters.append(waiter)
-                    return waiter
-                d.addCallback(doWait)
-            return d
-
-    class EnhancedCassanovaFactory(cassanova.CassanovaFactory):
-        handler_factory = EnhancedCassanovaInterface
-
-    class EnhancedCassanovaNode(cassanova.CassanovaNode):
-        factory = EnhancedCassanovaFactory
-
-        def endpoint_str(self):
-            return '%s:%d' % (self.addr.host, self.addr.port)
-
-    class FakeCassandraCluster(cassanova.CassanovaService):
-        """
-        Tweak the standard Cassanova service to allow nodes to run on the same
-        interface, but different ports. CassandraClusterPool already knows how
-        to understand the 'host:port' type of endpoint description in
-        describe_ring output.
-        """
-
-        node_class = EnhancedCassanovaNode
-
-        def __init__(self, num_nodes, start_port=41356, interface='127.0.0.1'):
-            cassanova.CassanovaService.__init__(self, start_port)
-            self.waiters = []
-            self.iface = interface
-            for n in range(num_nodes):
-                self.add_node_on_port(start_port + n)
-            # make a non-system keyspace so that describe_ring can work
-            self.keyspaces['dummy'] = cassanova.KsDef(
-                'dummy',
-                replication_factor=1,
-                strategy_class='org.apache.cassandra.locator.SimpleStrategy',
-                cf_defs=[]
-            )
-
-        def add_node_on_port(self, port, token=None):
-            node = self.node_class(port, self.iface, token=token)
-            node.setServiceParent(self)
-            self.ring[node.mytoken] = node
-
-        def stopService(self):
-            cassanova.CassanovaService.stopService(self)
-            for d in self.waiters:
-                if not d.called:
-                    d.cancel()
-                    d.addErrback(lambda n: None)
-
-if not cassanova:
-    del CassandraClusterPoolTest
