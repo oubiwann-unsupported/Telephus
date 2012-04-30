@@ -1,21 +1,17 @@
+from sys import exc_info
+
 from thrift.transport import TTwisted
 from thrift.protocol import TBinaryProtocol
+
 from twisted.internet.protocol import ReconnectingClientFactory
 from twisted.internet import defer, reactor
 from twisted.internet.error import UserError
 from twisted.python import failure
+
 from telephus import translate
 from telephus.cassandra.ttypes import *
 from telephus.cassandra.c08 import Cassandra
-from sys import exc_info
-
-
-class ClientBusy(Exception):
-    pass
-
-
-class InvalidThriftRequest(Exception):
-    pass
+from telephus.exceptions import ClientBusy, InvalidThriftRequest
 
 
 # Here for backwards compatibility

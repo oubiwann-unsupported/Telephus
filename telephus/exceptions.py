@@ -1,3 +1,11 @@
+class ClientBusy(Exception):
+    pass
+
+
+class InvalidThriftRequest(Exception):
+    pass
+
+
 class NoKeyspacesAvailable(UserWarning):
     """
     Indicates CassandraClusterPool could not collect information about the
