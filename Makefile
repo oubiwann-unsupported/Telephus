@@ -3,6 +3,10 @@ SOURCE = $(BASE)/cassandra
 CORE = $(SOURCE)/trunk
 THRIFT = $(SOURCE)/thrift
 
+clean:
+	sudo rm -rf build
+	rm -rf _trial_temp cassandra.log
+	find . -name "*.pyc" -exec rm -rfv {} \;
 
 testing-deps:
 	sudo apt-get install -y ant default-jdk python-nose libtool bison flex
@@ -33,3 +37,16 @@ check:
 
 check-full: testing-deps $(CORE) $(THRIFT) cassandra-build check-cassanova check
 .PHONY: check-full
+
+run-cassandra:
+	sudo /etc/init.d/cassandra start
+
+stop-cassandra:
+	sudo /etc/init.d/cassandra stop
+
+run-fake-cassandra: stop-cassandra
+	./bin/cassandra
+	tail -f cassandra.log
+
+stop-fake-cassandra:
+	kill `cat cassandra.pid`

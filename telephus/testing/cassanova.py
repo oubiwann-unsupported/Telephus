@@ -20,31 +20,34 @@
 # supercolumn-dicts map column names to Column objects. In addition, the
 # special None key in each supercolumn-dict is mapped to its own supercolumn
 # name.
+from cStringIO import StringIO
+from functools import partial
+import hashlib
+import os
+import random
+import re
+import struct
 
-from cassandra_thrift import Cassandra, constants
-from cassandra_thrift.ttypes import (KsDef, CfDef, InvalidRequestException, ColumnPath,
-                                     NotFoundException, TokenRange, ColumnOrSuperColumn,
-                                     SuperColumn, KeySlice, ColumnParent)
-from thrift.protocol import TBinaryProtocol
-from thrift.transport import TTwisted, TTransport
+from zope.interface import implements
+
 from twisted.application import internet, service
 from twisted.internet import defer
 from twisted.python import log
-from zope.interface import implements
-from cStringIO import StringIO
-from functools import partial
-import random
-import struct
-import hashlib
-import os
-import re
+
+from thrift.protocol import TBinaryProtocol
+from thrift.transport import TTwisted, TTransport
+
+from telephus.cassandra.c08 import Cassandra, constants
+from telephus.cassandra.c08.ttypes import (
+    KsDef, CfDef, InvalidRequestException, ColumnPath, NotFoundException,
+    TokenRange, ColumnOrSuperColumn, SuperColumn, KeySlice, ColumnParent)
+
 
 cluster_name = os.environ.get('CASSANOVA_CLUSTER_NAME', 'Fake Cluster')
-
 valid_ks_name_re = re.compile(r'^[a-z][a-z0-9_]*$', re.I)
 valid_cf_name_re = re.compile(r'^[a-z][a-z0-9_]*$', re.I)
-
 identity = lambda n:n
+
 
 class CassanovaInterface:
     implements(Cassandra.Iface)
@@ -468,6 +471,7 @@ class CassanovaInterface:
         dat[None] = name
         return SuperColumn(name=name, columns=cols)
 
+
 class CassanovaServerProtocol(TTwisted.ThriftServerProtocol):
     def processError(self, error):
         # stoopid thrift doesn't log this stuff
@@ -505,6 +509,7 @@ class CassanovaServerProtocol(TTwisted.ThriftServerProtocol):
         return '<%s at 0x%x (working=%s)>' % (self.__class__.__name__, id(self), self.working)
     __repr__ = __str__
 
+
 class CassanovaProcessor(Cassandra.Processor):
     def __init__(self, handler):
         Cassandra.Processor.__init__(self, handler)
@@ -522,6 +527,7 @@ class CassanovaProcessor(Cassandra.Processor):
             return d
         wrapper.func_name = 'wrapper_for_%s' % name
         return wrapper
+
 
 class CassanovaFactory(TTwisted.ThriftServerFactory):
     protocol = CassanovaServerProtocol
@@ -544,6 +550,7 @@ class CassanovaFactory(TTwisted.ThriftServerFactory):
         p.factory = self
         p.processor = self.processor_factory(self.handler_factory(self.node))
         return p
+
 
 class CassanovaNode(internet.TCPServer):
     factory = CassanovaFactory
@@ -597,7 +604,10 @@ class CassanovaNode(internet.TCPServer):
         return '<%s at %s:%d>' % (self.__class__.__name__, self.addr.host, self.addr.port)
     __repr__ = __str__
 
+
 java_class_map = {}
+
+
 class register_java_class(type):
     def __new__(metacls, name, bases, attrs):
         newcls = super(register_java_class, metacls).__new__(metacls, name, bases, attrs)
@@ -606,23 +616,30 @@ class register_java_class(type):
         java_class_map[javaname.rsplit('.', 1)[-1]] = newcls
         return newcls
 
+
 class JavaMimicClass(object):
     __metaclass__ = register_java_class
+
 
 class ReplicationStrategy(JavaMimicClass):
     pass
 
+
 class SimpleStrategy(ReplicationStrategy):
     java_name = 'org.apache.cassandra.locator.SimpleStrategy'
+
 
 class OldNetworkTopologyStrategy(ReplicationStrategy):
     java_name = 'org.apache.cassandra.locator.OldNetworkTopologyStrategy'
 
+
 class NetworkTopologyStrategy(ReplicationStrategy):
     java_name = 'org.apache.cassandra.locator.NetworkTopologyStrategy'
 
+
 class LocalStrategy(ReplicationStrategy):
     java_name = 'org.apache.cassandra.locator.LocalStrategy'
+
 
 class Partitioner(JavaMimicClass):
     min_bound = ''
@@ -632,6 +649,7 @@ class Partitioner(JavaMimicClass):
     def token_as_bytes(cls, tok):
         return tok
 
+
 class RandomPartitioner(Partitioner):
     java_name = 'org.apache.cassandra.dht.RandomPartitioner'
 
@@ -639,8 +657,10 @@ class RandomPartitioner(Partitioner):
     def token_as_bytes(cls, tok):
         return '%d' % tok
 
+
 class SimpleSnitch(JavaMimicClass):
     java_name = 'org.apache.cassandra.locator.SimpleSnitch'
+
 
 class AbstractType(JavaMimicClass):
     @classmethod
@@ -651,8 +671,10 @@ class AbstractType(JavaMimicClass):
     def comparator(cls, a, b):
         return cmp(cls.input(a), cls.input(b))
 
+
 class BytesType(AbstractType):
     java_name = 'org.apache.cassandra.db.marshal.BytesType'
+
 
 class LongType(AbstractType):
     java_name = 'org.apache.cassandra.db.marshal.LongType'
@@ -665,14 +687,18 @@ class LongType(AbstractType):
             raise ValueError('Bad input %r to LongType' % (mybytes,))
         return struct.unpack('!q', mybytes)[0]
 
+
 class IntegerType(AbstractType):
     java_name = 'org.apache.cassandra.db.marshal.IntegerType'
+
 
 class UTF8Type(AbstractType):
     java_name = 'org.apache.cassandra.db.marshal.UTF8Type'
 
+
 class TimeUUIDType(AbstractType):
     java_name = 'org.apache.cassandra.db.marshal.TimeUUIDType'
+
 
 class CassanovaService(service.MultiService):
     partitioner = RandomPartitioner()
