@@ -33,17 +33,12 @@ check-cassanova:
 	PYTHONPATH=$(CORE)/test nosetests -x --tests=telephus.testing.cassanova.testsuite
 	rm $(CORE)/test/__init__.py
 
+check: MOD ?= "telephus"
 check:
-	trial telephus
+	trial $(MOD)
 
 check-full: testing-deps $(CORE) $(THRIFT) cassandra-build check-cassanova check
 .PHONY: check-full
-
-run-cassandra:
-	sudo /etc/init.d/cassandra start
-
-stop-cassandra:
-	sudo /etc/init.d/cassandra stop
 
 run-fake-cassandra: stop-cassandra
 	./bin/cassandra
@@ -51,3 +46,9 @@ run-fake-cassandra: stop-cassandra
 
 stop-fake-cassandra:
 	kill `cat cassandra.pid`
+
+run-cassandra:
+	sudo /etc/init.d/cassandra start
+
+stop-cassandra: stop-fake-cassandra
+	sudo /etc/init.d/cassandra stop
