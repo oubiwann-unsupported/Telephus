@@ -12,6 +12,14 @@ THRIFT = $(SOURCE)/thrift
 	@echo
 	@echo "And then execute the following commands:"
 	@echo "   sudo apt-get update && sudo apt-get install cassandra"
+	@echo
+	@echo "If you get a NO_PUBKEY error, do the following:"
+	@echo
+	@echo "   gpg --keyserver keyserver.ubuntu.com --recv-keys <key id>"
+	@echo "   gpg --export --armor <key id> | sudo apt-key add -"
+	@echo
+	@echo "And then you can re-run the update/install commands."
+	@echo
 
 clean:
 	sudo rm -rf build
@@ -30,7 +38,7 @@ $(CORE): cassandra-base
 
 $(THRIFT): cassandra-base
 	-git clone git://git.apache.org/thrift.git $(THRIFT)
-	cd $(THRIFT) && ./bootstrap.sh && ./configure && make && sudo make install 
+	cd $(THRIFT) && ./bootstrap.sh && ./configure && make && sudo make install
 	cd $(THRIFT)/lib/py && sudo python setup.py install
 
 cassandra-build: cassandra-source
