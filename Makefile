@@ -29,7 +29,8 @@ cassandra-build: cassandra-source
 
 check-cassanova:
 	touch $(CORE)/test/__init__.py
-	PYTHONPATH=$(CORE)/test nosetests --tests=telephus.testing.testsuite
+#	PYTHONPATH=$(CORE)/test nosetests --tests=telephus.testing.testsuite
+	PYTHONPATH=$(CORE)/test nosetests -x --tests=telephus.testing.cassanova.testsuite
 	rm $(CORE)/test/__init__.py
 
 check:

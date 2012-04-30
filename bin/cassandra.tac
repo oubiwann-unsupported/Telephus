@@ -2,7 +2,7 @@ import os
 
 from twisted.application import service
 
-from telephus.testing.cassanova import CassanovaService
+from telephus.testing.cassanova.service import CassanovaService
 
 
 application = service.Application('cassanova')

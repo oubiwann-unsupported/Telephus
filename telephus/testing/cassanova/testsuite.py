@@ -2,7 +2,6 @@
 # removes the ones not expected to pass because of unsupported features.
 
 import os
-import sys
 import system
 
 system.root = os.path.dirname(__file__)
