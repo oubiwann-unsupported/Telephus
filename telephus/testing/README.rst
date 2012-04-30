@@ -56,18 +56,39 @@ working against the 0.7.3 branch, so I know it works there), make sure the
 Code overview
 -------------
 
-All the real code is in ``cassanova.py``. The more important classes are:
+All the real code is in ``telephus.testing.cassanova``. The more important
+classes are:
 
-- ``CassanovaInterface``: Provides the implementation of each of the
+- ``api.Cassanova``: Provides the implementation of each of the
   supported Thrift calls. Corresponds to a single Thrift connection to the
   service.
-- ``CassanovaNode``: Corresponds to a single (fake) Cassandra node, listening
+- ``server.CassanovaNode``: Corresponds to a single (fake) Cassandra node, listening
   on its own interface. You'll need to have a local network interface for each
   node you want to run.
-- ``CassanovaService``: The central service, which holds the schema and data.
+- ``service.CassanovaService``: The central service, which holds the schema and data.
   Corresponds to a whole cluster. The ``add_node`` method is used to
-  instantiate new listening ``CassanovaNode``\s, given a unique network
+  instantiate new listening ``api.CassanovaNode``\s, given a unique network
   interface.
 
-There is short explanation of the way data is stored in memory at the top of
-``cassanova.py``.
+------------
+Data Storage
+------------
+
+``service.CassanovaService`` stores info about keyspaces and column family
+definitions on the keyspaces attribute, separate from data.
+
+Actual data is stored in the data attribute, which is a dictionary mapping
+keyspace names to what I'll call keyspace-dicts.
+
+keyspace-dicts map ColumnFamily names to cf-dicts.
+
+cf-dicts map keys to row-dicts. In addition, the special None key in each
+cf-dict is mapped to its own ColumnFamily name.
+
+row-dicts map column names to Column objects, if in a standard
+``ColumnFamily``, or supercolumn names to supercolumn-dicts otherwise. In
+addition, the special None key in each row-dict is mapped to its own row key.
+
+supercolumn-dicts map column names to Column objects. In addition, the
+special None key in each supercolumn-dict is mapped to its own supercolumn
+name.
