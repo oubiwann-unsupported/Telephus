@@ -34,23 +34,28 @@ Using
 Requirements: Python (2.5 or higher), Twisted Matrix (8.0 or higher, I think),
 Thrift python library
 
-The simplest way to run Cassanova is with the ``twistd`` tool. To run in the
-foreground and log to the console, listening on the default port (12379)::
+The simplest way to run Cassanova is with the ``Makefile`` at the top-level of
+the Telephes codebase::
 
-    twistd -noy test.tap
+    make run-fake-cassandra
 
-To fork and run in the background, leaving a pid file::
+This runs in the background, calling a convenience wrapper, ``bin/cassandra``,
+which sets a PID file and logfile. It, in turn, calls a Twisted ``.tac`` file
+which imports the code from this subpackage. If you want to run the ``.tac``
+file directly, you can do the standard Twisted call for that::
 
-    twistd -y test.tap --pidfile whatever.pid --logfile cassanova.log
+    twistd -noy ./bin/cassandra.tac
 
-To change the listening port, set the ``$CASSANOVA_CLUSTER_PORT`` environment
-variable.
+This will run in the foreground.
+
+To change the port that this server runs on, set the
+``$CASSANOVA_CLUSTER_PORT`` environment variable.
 
 To run the test suite, have a Cassandra 0.7 source tree handy (I've been
 working against the 0.7.3 branch, so I know it works there), make sure the
 ``nose`` test coverage tool is installed, and run::
 
-    ./run_tests.sh ~/path/to/cassandra-tree
+    make check-cassanova
 
 -------------
 Code overview
