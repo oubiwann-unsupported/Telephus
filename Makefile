@@ -3,6 +3,16 @@ SOURCE = $(BASE)/cassandra
 CORE = $(SOURCE)/trunk
 THRIFT = $(SOURCE)/thrift
 
+/usr/sbin/cassandra:
+	@echo "You don't seem to have cassandra installed!"
+	@echo
+	@echo "Edit your /etc/apt/sources.list file to include the following:"
+	@echo "   deb http://www.apache.org/dist/cassandra/debian 10x main"
+	@echo "   deb-src http://www.apache.org/dist/cassandra/debian 10x main"
+	@echo
+	@echo "And then execute the following commands:"
+	@echo "   sudo apt-get update && sudo apt-get install cassandra"
+
 clean:
 	sudo rm -rf build
 	rm -rf _trial_temp cassandra.log
@@ -34,10 +44,10 @@ check-cassanova:
 	rm $(CORE)/test/__init__.py
 
 check: MOD ?= "telephus"
-check:
+check: /usr/sbin/cassandra
 	trial $(MOD)
 
-check-full: testing-deps $(CORE) $(THRIFT) cassandra-build check-cassanova check
+check-full: /usr/sbin/cassandra testing-deps $(CORE) $(THRIFT) cassandra-build check-cassanova check
 .PHONY: check-full
 
 run-fake-cassandra: stop-cassandra
@@ -47,7 +57,7 @@ run-fake-cassandra: stop-cassandra
 stop-fake-cassandra:
 	kill `cat cassandra.pid`
 
-run-cassandra:
+run-cassandra: /usr/sbin/cassandra
 	sudo /etc/init.d/cassandra start
 
 stop-cassandra: stop-fake-cassandra
