@@ -42,8 +42,3 @@ integration tests: they depend upon a running instance of Cassandra (they don't
 have network/db connections mocked yet). As such, you will see a great many
 errors if you attempt to run the tests without first having installed and
 started Cassandra.
-
-If you wish to run the cluster pool tests, you will need to have the Python
-Cassanova library installed. You can download it from here:
-
- * https://github.com/riptano/Cassanova

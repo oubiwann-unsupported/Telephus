@@ -17,4 +17,5 @@ fi
 export CASSANOVA_CLUSTER_NAME="Test Cluster"
 export CASSANOVA_CLUSTER_PORT=9170
 
-exec /usr/bin/twistd -y "test.tap" --logfile="$logfile" --pidfile="$pidfile" "$@"
+exec /usr/bin/twistd -y "./bin/test.tap" \
+    --logfile="$logfile" --pidfile="$pidfile" "$@"

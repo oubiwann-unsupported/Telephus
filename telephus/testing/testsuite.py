@@ -3,12 +3,13 @@
 
 import os
 import sys
-import __init__
+import system
 
-__init__.root = os.path.dirname(__file__)
-__init__.pid_fname = os.path.join(__init__.root, 'system_test.pid')
+system.root = os.path.dirname(__file__)
+system.pid_fname = os.path.join(system.root, 'system_test.pid')
+print system.pid_fname
 
-from test_thrift_server import TestMutations, TestTruncate
+from system.test_thrift_server import TestMutations, TestTruncate
 
 # this expects to see a TApplicationException from a bad insert call, but the
 # thrift definition doesn't say that we can throw one of those, so for now,
